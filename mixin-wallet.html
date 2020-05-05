@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0"/>
+    <title>Mixin Local Html Wallet</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsrsasign/8.0.12/jsrsasign-all-min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/forge/0.7.6/forge.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.22.2/moment.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/node-uuid/1.4.8/uuid.min.js"></script>
+    <script src="https://rawgit.com/kawanet/int64-buffer/master/dist/int64-buffer.min.js"></script>
+    <script type="text/javascript">
+
+      const AppClientId = 'b7347ca4-186e-4e54-9db6-755a4ab0b5d4';
+      const AppSessionId = 'ee3ef954-fc93-48f8-ad50-bc705f9164e5';
+      const AppPrivateKey = `-----BEGIN RSA PRIVATE KEY-----
+MIICXAIBAAKBgQCBY1QqnPbX9VN7zkGY0KGMO07x1lqfaR657ESibuL+KEyR142a
+IZPsUcZWhqEAnj+ffOHwRB8Sol4rbzV1K5xt8ihxaPfVcSgXHkS8SRG+PxIcyQ1n
+g4wmV4qwv2q68wdIXtewz5RoxsQ1LYah5ZHqlqMmI91lw8RkO8gzd37+LQIDAQAB
+AoGASUyDFuz7Lhat57pOEQtIKZBDxd9AUYSUwpElxLt63q7nyctKTeHt0ff1m3kD
+Zr0/n9N4j8uXqs/O91418530LMqedAuxIgQqhnuKm9v+EJf2shuXkzQ+cXRxZcA/
+Bniq4H+N4x6Sqldn7T0w5eGebe07z+CgKl80TOHPyrhSLkUCQQC9ZGqQ6cturV+Y
+JMkP2Vyn5nPg9dJAHaJCC/pt8A5PoZaTYCa6xIpxqWTGiKlRRQJEr84x35mfFdgx
+cdikcYqjAkEAruSKR74uKNAvmrFVba4JqX0+cSMuqc7Utf8rXFj/+fU0SNHpKeRq
+u6mxagu0sunHEQ+nmKDupQL4zihmsoAw7wJAKzn2EKkr41Dy1pjewx1LRo8Ut62j
+lTquRADT4a++tHIfGfgCHvKo3pRZCe87Je9oOyEdIMj2GRc1RuPDHJVFnQJBAJAH
+vqmewbzy1oF7EXOmJGbksgvSgZdusla/siH3WbesbEacOH07k3rBIU7IHSRKypoO
+XmOgBWj3rZd6RjkywRkCQG69Z9SRYpJ6y0fqiehNSK+nKmFfqM4Pu2qxDOzqmQFL
+V7OifooQbQjeXx9ML+TCf8FRgYVrhpPPts4PvbB4XQA=
+-----END RSA PRIVATE KEY-----`;
+
+      function getAuthenticationToken(uid, sid, privateKey, method, uri, body) {
+        if (typeof body !== 'string') { body = ""; }
+
+        let expire = moment.utc().add(1, 'minutes').unix();
+        let md = forge.md.sha256.create();
+        md.update(method + uri + body);
+
+        var oHeader = {alg: 'RS512', typ: 'JWT'};
+        var oPayload = {
+          uid: uid,
+          sid: sid,
+          exp: expire,
+          jti: uuid(),
+          sig: md.digest().toHex()
+        };
+        var sHeader = JSON.stringify(oHeader);
+        var sPayload = JSON.stringify(oPayload);
+        return KJUR.jws.JWS.sign('RS512', sHeader, sPayload, privateKey);
+      }
+
+      function request(method, path, params, callback) {
+        var body = JSON.stringify(params);
+        var url = 'https://api.mixin.one' + path;
+        var token = '';
+        if ('/users' === path) {
+          token = getAuthenticationToken(AppClientId, AppSessionId, AppPrivateKey, method, path, body);
+        } else {
+          var uid = window.localStorage.getItem('uid');
+          var sid = window.localStorage.getItem('sid');
+          var privateKey = window.localStorage.getItem('prvkey');
+          token = getAuthenticationToken(uid, sid, privateKey, method, path, body);
+        }
+        return send(token, method, url, body, callback);
+      }
+
+      function send(token, method, url, body, callback) {
+        const self = this;
+        $.ajax({
+          type: method,
+          url: url,
+          contentType: "application/json",
+          data: body,
+          beforeSend: function(xhr) {
+            xhr.setRequestHeader("Authorization", "Bearer " + token);
+          },
+          success: function(resp) {
+            var consumed = false;
+            if (typeof callback === 'function') {
+              consumed = callback(resp);
+            }
+            if (!consumed && resp.error !== null && resp.error !== undefined) {
+              console.info(JSON.stringify(resp));
+              alert(JSON.stringify(resp));
+            }
+          },
+          error: function(event) {
+            alert(JSON.stringify(event.responseJSON));
+          }
+        });
+      }
+
+      function hexToBytes(hex) {
+        const bytes = []
+        for (let c = 0; c < hex.length; c += 2) {
+          bytes.push(parseInt(hex.substr(c, 2), 16))
+        }
+        return bytes
+      }
+
+      function encryptPIN(pin, iterator) {
+        if (!pin) {
+          return ''
+        }
+
+        var sessionId = window.localStorage.getItem('sid');
+        var pinToken = window.localStorage.getItem('pintoken');
+        var privateKey = window.localStorage.getItem('prvkey');
+
+        privateKey = forge.pki.privateKeyFromPem(privateKey);
+        const pinKey = privateKey.decrypt(forge.util.decode64(pinToken), 'RSA-OAEP', {
+          md: forge.md.sha256.create(),
+          label: sessionId
+        });
+
+        let _iterator = new Uint8Array(new Uint64LE(moment.utc().unix()).buffer)
+        _iterator = forge.util.createBuffer(_iterator)
+        iterator = iterator || _iterator
+        iterator = iterator.getBytes()
+        let time = new Uint8Array(new Uint64LE(moment.utc().unix()).buffer)
+
+        time = forge.util.createBuffer(time)
+        time = time.getBytes()
+
+        let pinByte = forge.util.createBuffer(pin, 'utf8')
+        const blockSize = 16
+
+        let buffer = forge.util.createBuffer()
+        buffer.putBytes(pinByte)
+        buffer.putBytes(time)
+        buffer.putBytes(iterator)
+        let paddingLen = blockSize - (pinByte.length() % blockSize)
+        let padding = forge.util.hexToBytes(paddingLen.toString(16))
+
+        while (paddingLen > 0) {
+          paddingLen--
+          buffer.putBytes(padding)
+        }
+
+        let iv = forge.random.getBytesSync(16)
+        let key = hexToBytes(forge.util.binary.hex.encode(pinKey))
+        let cipher = forge.cipher.createCipher('AES-CBC', key)
+
+        cipher.start({
+          iv: iv,
+        })
+        cipher.update(buffer)
+
+        cipher.finish(() => true)
+
+        let pin_buff = forge.util.createBuffer()
+        pin_buff.putBytes(iv)
+        pin_buff.putBytes(cipher.output.getBytes())
+
+        const encryptedBytes = pin_buff.getBytes()
+        return forge.util.encode64(encryptedBytes)
+      }
+
+      function strip(key) {
+        if (key.indexOf('-----') !== -1) {
+          return key.split('-----')[2].replace(/\r?\n|\r/g, '');
+        }
+      }
+
+      function createUser(fullname, callback) {
+          var keyPair = KEYUTIL.generateKeypair("RSA", 1024);
+          keyPair.prvKeyObj.isPrivate = true;
+          var privateKey = KEYUTIL.getPEM(keyPair.prvKeyObj, "PKCS1PRV");
+          var publicKey = KEYUTIL.getPEM(keyPair.pubKeyObj);
+          
+          let params = {
+              session_secret : strip(publicKey),
+              full_name : fullname
+          };
+          request('POST', '/users', params, function(resp) {
+            callback(resp)
+          });
+      }
+
+      function updatePIN(oldPIN, newPIN, callback) {
+        request('POST', '/pin/update', { old_pin : encryptPIN(oldPIN), pin : encryptPIN(newPIN) }, function(resp) {
+          callback(resp)
+        });
+      }
+
+      $(document).ready(function() {
+        $('#tab-user').click(function() {
+          $(this).css({'border': '2px solid #E4E4E4', 'background-color': 'beige'});
+          $('#tab-asset').css({'border': '', 'background-color': ''});
+          $('#generate-user-panel').show();
+          $('#assets-panel').hide();
+        });
+        $('#tab-asset').click(function() {
+          $(this).css({'border': '2px solid #E4E4E4', 'background-color': 'beige'});
+          $('#tab-user').css({'border': '', 'background-color': ''});
+          $('#generate-user-panel').hide();
+          $('#assets-panel').show();
+        });
+        $('#assets-panel').hide();
+
+        // create user
+        $('#new-user').click(function() {
+          // request('POST', '/users', params, function(resp) {
+          //   if (resp.data) {
+          //     console.info(resp.data);
+          //     window.localStorage.setItem('uid', resp.data.user_id);
+          //     window.localStorage.setItem('sid', resp.data.session_id);
+          //     window.localStorage.setItem('pintoken', resp.data.pin_token);
+          //     window.localStorage.setItem('prvkey', privateKey);
+
+            // const time = new Uint8Array(new Uint64LE(Math.floor(Date.now() / 1000)).toArrayBuffer());
+
+              // var sessionId = window.localStorage.getItem('sid');
+              // var pinToken = window.localStorage.getItem('pintoken');
+              // var privateKey = window.localStorage.getItem('prvkey');
+              // // let time = new Uint64LE(moment.utc().unix());
+              // //time = [...time.toArrayBuffer()].reverse();
+              // console.info(sessionId);
+              // console.info(pinToken);
+              // console.info(privateKey);
+
+              // console.info(window.localStorage.getItem('uid'));
+
+              // console.info($('#init-pin').val());
+
+              //old_pin : '', 
+              request('POST', '/pin/update', { old_pin : '', pin : encryptPIN('123456') }, function(resp) {
+                if (resp.data) {
+                  console.info(resp.data);
+                }
+              });
+
+              // request('POST', '/pin/update', { old_pin : '', pin : 'POgwT/tqznxOklTbVEa1/bNxmqtA5wc1nDvncdSGsurzML0bA97K6nIl48SFdRYQ' }, function(resp) {
+              //   if (resp.data) {
+              //     console.info(resp.data);
+              //   }
+              // });
+          //   }
+          // });
+          
+
+          // request('POST', '/me', null, function(resp) {
+          //   if (resp.data) {
+          //     console.info(JSON.stringify(resp.data));
+          //   }
+          // });
+        });
+      });
+    </script>
+  </head>
+  <body style="margin: 0px; padding: 0px;">
+    <div style="position:absolute; width: 520px; left:50%; margin-left: -260px;">
+        <div style="margin-top: 50px;">
+          <label id="tab-user" style="padding: 15px 24px; border: 2px solid #E4E4E4; cursor: pointer; background-color: beige;">Generate User</label>
+          <label id="tab-asset" style="padding: 15px 24px; cursor: pointer;">Management Assets</label>
+        </div>
+        <!--display:none;-->
+        <div style="padding-top: 20px;" id="generate-user-panel">
+          <h3>User Private Key</h3>
+          <textarea id="user-private-key" rows="10" style="width: 80%;"></textarea>
+          <h3>User Full name</h3>
+          <input type="text" id="full-name" value="TestUser" autocomplete="off" style="width: 120px; padding: 4px 8px; font-size: 18px;"/>
+          <br/>
+          <h3>Initial 6 digit PIN</h3>
+          <input type="text" id="init-pin" value="123456" autocomplete="off" style="width: 100px; padding: 4px 8px; font-size: 18px;"/>
+          <br/>
+          <button id="new-user" style="margin-top: 20px; padding: 12px 24px; font-size: 16px; text-align: center; text-decoration: none; display: inline-block; border: none; background-color: #4CAF50; color: white; border-radius: 2px;">Generate New User</button>
+        </div>
+
+        <div style="padding-top: 20px;" id="assets-panel">
+            <h2>User Private Key</h2>
+        </div>
+      </div>
+  </body>
+</html>
